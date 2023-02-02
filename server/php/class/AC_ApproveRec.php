@@ -139,36 +139,48 @@ $empId为当前操作人的编号，仅当!isFirst时有意义，isFirst时可�
 
 */
 	static function getApprover($isFirst, $empId, $objId, $stage, $approveConf) {
+		$getOriginId = function () use ($isFirst, $empId, $objId, $stage, $approveConf) {
+			// 发起审批且是第1级时，操作人（empId）就是发起人
+			if ($isFirst && $stage['role'] == $approveConf['stages'][0]['role'])
+				return $empId;
+			return ApproveRec::getOriginator($objId, $approveConf["name"]);
+		};
+
 		$role = $stage["role"];
 		$code = $stage["getApprover"];
 		if ($code) { // 自定义逻辑
-			$getOriginId = function () use ($isFirst, $empId, $objId, $stage, $approveConf) {
-				// 发起审批且是第1级时，操作人（empId）就是发起人
-				if ($isFirst && $stage['role'] == $approveConf['stages'][0]['role'])
-					return $empId;
-				return ApproveRec::getOriginator($objId, $approveConf["name"]);
-			};
 			try {
 				$rv = eval($code);
 			}
 			catch (Exception $ex) {
 				logit("conf_approve getApprover eval fail: $ex, code=`$code`");
-				jdRet(E_SERVER, null, "审批人设置出错: " . $ex->getMesaage());
+				jdRet(E_SERVER, null, "审批人设置出错: " . $ex->getMessage());
 			}
 		}
 		else {
+			checkAuth(AUTH_EMP);
 			$cond = null;
+			if ($stage["groupField"]) {
+				$originId = $getOriginId();
+				if ($originId) {
+					$group = queryOne("SELECT {$stage['groupField']} FROM Employee WHERE id=$originId");
+					if ($group) {
+						$cond[$stage['groupField']] = $group;
+					}
+				}
+			}
 			if ($isFirst) { // 发起审批
 			}
 			else {
-				checkAuth(AUTH_EMP);
-				$cond = ["id" => $empId];
+				$cond["id"] = $empId;
 			}
 			$rv = callSvcInt("Employee.query", ["cond"=>$cond, "res"=>"id,name", "role"=>$role, "fmt"=>"one?"]);
 			if ($rv) {
 				$rv["name"] .= "(emp-{$rv['id']})";
 			}
 		}
+		if ($isFirst && (!$rv || !$rv["id"]))
+			jdRet(E_SERVER, "getApprover fails", "找不到审批人：审批流={$approveConf['name']},角色=$role");
 		return $rv;
 	}
 
@@ -180,31 +192,36 @@ $empId为当前操作人的编号，仅当!isFirst时有意义，isFirst时可�
 			if ($row["approveFlag"] == 1) {
 				$ret = $row["empId"];
 			}
-			else {
+			else if ($ret) {
 				break;
 			}
 		}
+		if (!$ret)
+			jdRet(E_SERVER, "getOriginator fails", "找不到审批发起人: 审批流=$approveFlag, 文档号=$objId");
 		return $ret;
 	}
 }
 
 class AC0_ApproveRec extends AccessControl
 {
-	protected $vcolDefs = [
-		[
-			"res" => ['emp.name empName'], 
-			"join" => 'LEFT JOIN Employee emp ON emp.id=t0.empId', 
-			"default" => true
-		], 
-		[
-			"res" => ['approveEmp.name approveEmpName'], 
-			"join" => 'LEFT JOIN Employee approveEmp ON approveEmp.id=t0.approveEmpId', 
-			"default" => true
-		]
-	];
-
 	protected $requiredFields = ['objId', 'approveFlag', 'approveFlow'];
 	protected $allowedAc = ['add', 'query', 'setIf', 'delIf'];
+
+	protected function onInit() {
+		$Employee = param("empTable")?:"Employee";
+		array_push($this->vcolDefs, 
+			[
+				"res" => ['emp.name empName'], 
+				"join" => "LEFT JOIN $Employee emp ON emp.id=t0.empId", 
+				"default" => true
+			], 
+			[
+				"res" => ['approveEmp.name approveEmpName'], 
+				"join" => "LEFT JOIN $Employee approveEmp ON approveEmp.id=t0.approveEmpId", 
+				"default" => true
+			]
+		);
+	}
 
 	protected function onValidate() {
 		$approveFlow = mparam("approveFlow", "P");
@@ -283,7 +300,8 @@ class AC0_ApproveRec extends AccessControl
 			if ($approveFlag == 2) { // accept
 				// 进入下一审批阶段
 				if ($stageIdx < count($stages)-1 && ApproveRec::matchCond($objId, $conf, $stageIdx+1)) {
-					$_POST["approveStage"] = $stages[$stageIdx+1]["role"];
+					$stage = $stages[$stageIdx+1];
+					$_POST["approveStage"] = $stage["role"];
 					// 发起下一阶段审批
 					$approver = ApproveRec::getApprover(true, $empId, $objId, $stage, $conf);
 					if ($approver)
@@ -322,7 +340,7 @@ class AC0_ApproveRec extends AccessControl
 				}
 				catch (Exception $ex) {
 					logit("conf_approve onOk eval fail: $ex, code=`" . $conf["onOk"] . "`");
-					jdRet(E_SERVER, null, "审批成功后回调出错: " . $ex->getMesaage());
+					jdRet(E_SERVER, null, "审批成功后回调出错: " . $ex->getMessage());
 				}
 			}
 		};

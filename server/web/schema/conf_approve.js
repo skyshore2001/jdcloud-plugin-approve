@@ -44,6 +44,12 @@ var schema = {
 							required: true,
 							description: "除了指定角色外，指定的人员或最高管理员也有权审批"
 						},
+						groupField: {
+							title: "分组字段",
+							type: "string",
+							default: "grp",
+							description: "如果填写，则审批人与发起人的该字段值相同，即在同一组。"
+						},
 						cond: {
 							title: "条件",
 							type: "string",
@@ -54,7 +60,7 @@ var schema = {
 							$ref: "#/definitions/phpCode",
 							description: `参数<code>($isFirst/是否发起审批, $empId/isFirst时为审批人, $objId/文档编号, $getOriginId()/取发起人)</code><br>
 成功应返回<code>{id/审批人编号,name/审批人名}</code><br>
-如果不填，则根据审批角色找审批人`,
+如果不填，则根据审批角色和分组字段找审批人`,
 							default: `return ["id"=>$empId, "name"=>"张三"];`
 						}
 					}

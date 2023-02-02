@@ -15,7 +15,6 @@
 
 TODO
 
-- 角色限制同组内
 - 转交
 - 或批（N个人审批通过才算通过）每级可指定最少几人审批通过才能去下一级。
 	比如要求财务部必须至少2人批准同意，这类需求太少，暂不支持，可在stage中增设minCnt字段来实现。
@@ -43,41 +42,40 @@ jdcloud项目先安装依赖插件，然后按以下步骤配置。
 
 conf_approve为审批配置项，在系统配置中通过jsonEditor编辑。建议以二开方式直接在【系统设置】下添加一个【审批流配置】菜单项（详见后面开发手册）。
 
-### 多级审批且带条件
-
 示例：采购单需要先经发起人所在部门主管审批，若金额超过10000元时，需要总经理审批。
 
 【分析】
 
 这是个多级审批的案例，每一级完成审批后到下一级审批，全部审批完成后，修改文档状态为审批通过。
-
 同时，第一级审批，即部门审批，它要求只能由用户所在部门的主管来审批，而不是任何部门主管都可审批。
-
-审批人可以通过角色来查找。为了限制部门，还需要引入部门概念，必须部门匹配了，才能再匹配角色。
-
-为了支持自动触发审批流程，需要开发在onValidate的合适条件下调用`ApproveRec::autoRun($obj, $objId, $approveFlow)`
+审批人可以通过角色来查找，再加以限制部门。
 
 【解决方案】
+
+员工上增加grp字段表示部门（用grp替代group是为了避开SQL关键字）。
 
 假如采购单是Ordr对象（共用对象，且用字段type=POR来过滤）。
 
 - 新增审批流: 名称=采购审批, 表名=Ordr, 关联字段名=approveRecId
 - 新增两行审批阶段(stage)：
- - 角色="经理"，条件=`type='POR'`，TODO: 限定=group-同组 (表示审批人须与发起人所在部门即group的值匹配)
+ - 角色=采购主管，条件=`type='POR'`，分组字段=grp，表示审批人须与发起人所在部门（即grp字段值）匹配
  - 角色=总经理, 条件=`amount>=10000`，表示金额超过10000时，须有“总经理”角色的员工来审批
 
-TODO: 员工表除设置角色(Employee.perms字段)外，还应设置所在部门即须有Employee.group字段（可定义虚拟字段）。(TODO: 如何支持多级组织，用自定义审批人逻辑？)
+员工表(Employee)除了默认支持的角色外，还应添加所在部门字段，比如Employee.grp字段（当然也可以是address, groupId等各种字段）。
 
-TODO: 如果找不到审批人，则工作流无法进行下去。软件应提示相关错误。
+如果找不到审批人，则工作流无法进行下去。软件将提示相关错误。
 
 审批阶段如果不指定条件，则表示无条件触发，如果指定，则在条件匹配时触发。
 条件是个类似SQL条件的表达式，可以使用对象的字段或虚拟字段。特别的，条件为`0`或`0 and `开头则不触发。
+
+为了支持自动触发审批流程，需要添加后端逻辑，在onValidate中调用`ApproveRec::autoRun`。
+管理端上可在页面工具栏上添加审批按钮，需要添加前端逻辑，数据表加载时添加`approveFlow`类型按钮。
 
 ## 数据库设计
 
 审批过程:
 
-@ApproveRec: id, tm, empId, obj, objId, approveFlag, approveEmpId, approveDscr, approveFlow, approveStage
+@ApproveRec: id, tm, empId, obj, objId, approveFlag, approveEmpId, approveDscr(t), approveFlow, approveStage
 
 - empId: 操作人，发起审批时为发起人，审批时为审批人。
 - approveFlag: 审批状态（最终状态）
@@ -98,10 +96,16 @@ TODO: 如果找不到审批人，则工作流无法进行下去。软件应提�
 
 - field: 例如在Ordr中添加approveRecId字段关联ApproveRec表，则obj=Ordr, field=approveRecId
 - stages: 审批阶段数组，[{role/审批角色即审批阶段名, cond/触发条件, getApprover/自定义审批人逻辑}]
-	- role: 审批人角色，TODO: 支持限定部门。
+	- role: 审批人角色
+	- groupField: 找审批人时，除了匹配指定角色，还需要与发起人同组（即该字段值相同）
 	- cond: 审批触发条件。空表示触发，0表示不触发。一个类似SQL查询条件的表达式，具体参考后端evalExpr函数(表达式计算引擎)，示例："amount>100 and status='PA'"，字段可以用对象的实际字段或虚拟字段。
 	- getApprover(): 查询和验证审批人的自定义逻辑，如果不指定，则系统默认是用role作为员工角色来查询和验证身份。
 - onOk(): 审批通过后的自定义逻辑。
+
+【query接口参数】
+
+- empTable: 区分员工审批还是用户审批，默认值为"Employee"。字段empId/approveEmpId默认关联Employee表，若要关联User或其它，需要指定该参数。
+	示例：`callSvr("ApproveRec.query", {empTable: "User"})`
 
 组织架构:
 Require: @Employee: id, name, perms, group
@@ -134,21 +138,57 @@ vcol
 - $empId为当前操作人的编号，仅当!isFirst时有意义，isFirst时可能是发起人也可能是审批人（触发多级审批时）。
 	取发起人可使用`$originId = $getOriginId()`得到。
 
-示例：
+示例1：
 
 	return ["id"=>1, "name"=>"张三"];
 
 示例2：“区域管理员”角色，以User表作为用户，定义为：取与发起人(originId)相同客户组(cusId)且未绑定门店(storeId is null)的人
 
 	$originId = $getOriginId();
-	$cusId = callSvcInt("User.query", ["res"=>"cusId", "cond"=>["id"=>$originId], "fmt"=>"one?"]);
+	$cusId = queryOne("SELECT cusId FROM User WHERE id=$originId");
 	if (!$cusId)
 		return;
 	$cond = ["cusId"=>$cusId, "storeId"=>"null"];
 	if (! $isFirst) {
 		$cond["id"] = $empId;
 	}
-	return callSvcInt("User.query", ["res"=>"id,name", "cond"=>$cond, "fmt"=>"one?"]);
+	return queryOne("SELECT id,name FROM User", true, $cond);
+
+注意：如果是用户(User)身份发起调用，若用callSvcInt调用接口可能没有权限，可以用queryOne/queryAll来查询。
+
+示例3：审批人为发起人的部门主管，若部门主管未设置，则再循环向上级部门找主管，如果最终找不到，则发起人即为审批人。
+这类似于钉钉审批流中找审批人的逻辑。
+
+数据库设计为，部门为树状结构，每个部门可设置主管，每个员工指定部门。
+
+	@Employee: ..., deptId
+	@Dept: id, fatherId, mgrId
+
+实现逻辑供参考:
+
+```php
+// 验证总是失败，表示只能由指定审批人(approveEmpId)审批，不支持其它人审批。
+if (! $isFirst)
+	return;
+
+$originId = $getOriginId();
+$default = ["id"=>$originId, "name"=>"发起人(#$originId)"];
+
+$deptId = queryOne("SELECT deptId FROM User WHERE id=$originId");
+while (true) {
+	if (!$deptId)
+		return $default;
+	$rv = queryOne("SELECT dp.fatherId deptId, mgr.id mgrId, mgr.name mgrName 
+FROM Dept dp
+LEFT JOIN User mgr ON mgr.id=dp.mgrId
+WHERE dp.id=$deptId");
+	if ($rv === false)
+		return $default;
+	$deptId = $rv["deptId"];
+	if ($rv["mgrId"])
+		return ["id"=>$rv["mgrId"], "name"=>$rv["mgrName"]];
+}
+```
 
 ## 交互接口
 
@@ -278,21 +318,10 @@ vcol
 			}
 		}
 		```
-	- name=approveEmpId，title=审批人, opt:
-		```javascript
-		{
-			disabled: true,
-		}
-		```
-	- name=approveDscr, title=审批备注, opt:
-		```javascript
-		{
-			disabled: true,
-			format: "textarea"
-		}
-		```
-	- name=approveStage, title=审批阶段, opt=`{disabled: true}`
-	- name=approveFlow, title=审批流程, opt=`{disabled: true}`
+	- name=approveEmpId，title=审批人
+	- name=approveDscr, title=审批备注, 类型="t-长文本"(将显示为多行文本), uiType="text-文本框", opt=`{disabled: true}`
+	- name=approveStage, title=审批阶段, uiType="text-文本框", opt=`{disabled: true}`
+	- name=approveFlow, title=审批流程, uiType="text-文本框", opt=`{disabled: true}`
 
 	（按钮）确定，关闭配置对话框。
 
@@ -371,9 +400,27 @@ TODO: 转交
 
 ### 用例2：多级审批
 
-本用例基于用例1，同时测试一个对象上多个审批、自定义审批人。
+本用例与用例1共用Ordr对象，同时测试一个对象上多个审批、自定义审批人。
 
-审批流“门店下单”，由门店用户（User）下单，下单后先由区域管理员审批，再由总部管理员审批，审批通过后，自动将订单状态改为已审批。
+审批流“门店下单”，由门店用户（User）下单，下单后先由“区域管理员”审批，再由“总部管理员”审批。
+
+其中“区域管理员”角色定义为：取与发起人(originId)相同客户组(grp)且职位为"区域管理员"(pos)的用户。用户上需要扩展grp和pos字段。
+“总部管理员”直接设置为某人。
+
+#### 用户对象扩展
+
+操作：配置若干用户
+
+- 以二次开发方式，为用户（User）扩展字段，新增字段：grp/客户组，pos/职位。
+管理端中默认没有用户管理页面，可用超级管理端中拷贝过来：将web/adm/pageUser.html和pageUser.js拷贝到web/page下。
+
+- 以二次开发方式配置菜单项，【系统设置】-【开发】-【菜单管理】中添加【运营管理】-【用户管理】菜单项，代码为`WUI.showPage("pageUser")`
+
+- 添加4个用户，设置其客户组（grp）、职位（pos）：
+	- user1: 登录名=user1, 姓名=用户1, 手机号=12345678901, 登录密码=1234, 客户组(grp)=销售1部 （将作为发起人）, 职位(pos)=（空）
+	- user2: 登录名=user2, 姓名=用户2, 手机号=12345678902, 登录密码=1234, 客户组(grp)=销售1部, 职位(pos)=区域管理员
+	- user3: 登录名=user3, 姓名=用户3, 手机号=12345678903, 登录密码=1234, 客户组(grp)=销售2部, 职位(pos)=区域管理员
+	- user4: 登录名=user4, 姓名=用户4, 手机号=12345678904, 登录密码=1234, 客户组(grp)=（空）, 职位(pos)=（空）, 记下用户编号比如4, 下面将当作总部管理员用。
 
 #### 新增审批流程
 
@@ -383,10 +430,20 @@ TODO: 转交
 - (按钮) 新增审批流，填写: 名称=门店下单，表名=Ordr，关联字段名=approveRecId2
 - (按钮) 新增审批阶段，填写：审批角色=区域管理员，自定义审批人逻辑：
 	```php
-	TODO
+	$originId = $getOriginId();
+	$grp = queryOne("SELECT grp FROM User WHERE id=$originId");
+	if (!$grp)
+		return;
+	$cond = ["grp"=>$grp, "pos"=>"区域管理员"];
+	if (! $isFirst) {
+		$cond["id"] = $empId;
+	}
+	return queryOne("SELECT id,name FROM User", true, $cond);
 	```
-- (按钮) 新增审批阶段，填写：审批角色=总部管理员。
-- (按钮)确定
+- (按钮) 新增审批阶段，填写：审批角色=总部管理员，自定义审批人逻辑中直接使用上面user4的信息：
+	```php
+	return ["id"=>4, "name"=>"总部管理员(user4)"];
+	```
 
 结果：新增成功
 
@@ -396,8 +453,7 @@ TODO: 转交
 
 操作：Ordr对象支持“门店下单”审批。
 
-- 以开发模式打开管理端（url后加`?dev`参数）
-- 数据模型中，为Ordr对象新增字段：名称=approveRecId2，类型=i-整数，显示名=门店下单审批记录
+- 以开发模式打开管理端，数据模型中，扩展Ordr对象，新增字段：名称=approveRecId2，类型=i-整数，显示名=门店下单审批记录
 	配置Ordr对象的【AC逻辑】，设置【onInit】代码：
 	```php
 	$this->vcolDefs[] = ApproveRec::vcols("approveRecId2"); 
@@ -409,12 +465,14 @@ TODO: 转交
 	// 添加时触发审批
 	if ($this->ac == "add") {
 		$this->onAfterActions[] = function () {
+			// 注意指定了审批流名称，要与此前配置中一致。
 			ApproveRec::autoRun("Ordr", $this->id, "门店下单");
 		};
 	}
 	```
+
 - 页面中，打开订单页面，参考用例1，新增一些关联字段：
-	- name/字段名=approveFlag2, title/显示名=审批状态2，uiType/UI类型=combo:下拉列表-固定值映射，opt/配置代码：
+	- name/字段名=approveFlag2, title/显示名=审批状态2, uiType/UI类型="combo:下拉列表-固定值映射", opt/配置代码：
 		```javascript
 		{
 			disabled: true,
@@ -422,97 +480,60 @@ TODO: 转交
 			styler: Formatter.enumStyler(ApproveFlagStyler),
 			formatter: function (val, row) {
 				return WUI.makeLink(val, function () {
-					// 注意后面要用row.approveFlow2
-					WUI.showPage("pageUi", {uimeta:"metaApproveRec", title: "门店下单审批记录-订单" + row.id, force: 1, pageFilter: {cond: {objId: row.id, approveFlow:row.approveFlow2} }});
+					// 注意: 1。pageFilter过滤条件中要用row.approveFlow2字段；2。由于是关联用户(User)表，须指定`empTable:"User"`参数作为`ApproveRec.query`查询条件
+					WUI.showPage("pageUi", {uimeta:"metaApproveRec", title: "门店下单审批记录-订单" + row.id, force: 1, pageFilter: {cond: {objId: row.id, approveFlow:row.approveFlow2}, empTable: "User" }});
 				})
 			}
 		}
 		```
-	- name=approveEmpId2，title=审批人2, opt:
-		```javascript
-		{
-			disabled: true,
-		}
-		```
-	- name=approveDscr2, title=审批备注2, opt:
-		```javascript
-		{
-			disabled: true,
-			format: "textarea"
-		}
-		```
-	- name=approveStage2, title=审批阶段2, opt=`{disabled: true}`
-	- name=approveFlow2, title=审批流程2, opt=`{disabled: true}`
+	- name=approveEmpId2, title=审批人2
+	- name=approveDscr2, title=审批备注2, 类型="t-长文本"(将显示为多行文本), uiType="text-文本框", opt=`{disabled: true}`
+	- name=approveStage2, title=审批阶段2, uiType="text-文本框", opt=`{disabled: true}`
+	- name=approveFlow2, title=审批流程2, uiType="text-文本框", opt=`{disabled: true}`
 
 结果：打开订单页面及对话框，看到上述审批相关字段。
 
-操作：在订单页面上新增审批工具栏按钮。
+注意：与用例1不同，不必在订单页面上新增审批工具栏按钮，因为是在用户端审批，而不是在管理端审批。
 
-- （菜单）系统配置-开发-前端代码，编写代码（与用例1相应代码合在一起）
-	```javascript
-	UiMeta.on("dg_toolbar", "pageOrder", function (ev, buttons, jtbl, jdlg) {
-		var btnApprove = ["approveFlow", {
-			name: "订单毛利率",
-			text: "毛利率审批",
-		}];
-		var btnApprove2 = ["approveFlow", {
-			name: "门店下单",
-			text: "门店下单审批",
-			approveFlagField: "approveFlag2"
-		}];
-		buttons.push(btnApprove, btnApprove2);
-	});
-	```
+#### 执行审批流
 
-结果：订单页面的工具栏上增加"毛利率审批"和"门店下单审批"按钮。
-
-#### 执行审批流(TODO)
-
-操作：新增角色“老板”
-
-- 新增角色“老板”
-- 新增员工user1，角色为管理员，新增员工user2，角色为管理员、老板。
-
-操作：自动发起审批。
-
-- 新增订单，填写：金额=200，毛利率=0.1。
-此时：状态=新创建，审批状态=无审批。
-
-- 将订单状态修改为“待服务”。
-
-结果：
-
-- 订单记录：状态=新创建（未变化！），审批状态=待审批，审批人=（user2的id）
-- 点“审批状态”字段（即“待审批”链接），打开关联的审批记录页面，有一条记录: 操作人=admin，审批状态=待审批，审批人=user2，审批流程=订单毛利率，审批阶段=老板，对象类型=Ordr
+以下以最高管理员登录管理端，用户登录则使用浏览器隐身窗口打开用户端，互不干扰。
 
 操作：审批
 
-- 新开隐身窗口，以user1用户登录，打开订单页面（注意此时用户无“老板”角色，无审批权限）
-- 选中新增的待审批订单，（按钮）毛利率审批-审批不通过，弹出审批对话框中直接点击确定。
-- 结果：报错，无权限审批。
-- 在另一个管理端中（以最高管理员登录）为user1用户添加“老板”角色。
-- 切回隐身窗口user1界面，再次审批该订单，（按钮）毛利率审批-审批不通过，点确定提交。
-- 结果：订单记录：审批状态=不通过，审批备注=（自动填写），点【审批状态】打开【审批记录】页面，看到2条审批记录。
-- 再次审批该订单，（按钮）毛利率审批-审批通过，在备注中任意填写如`abc`，点确定提交。
+- 打开User登录的系统（m2/index.html），以user1身份(用户名user1/密码1234)登录进去并创建订单。
+- 结果：在管理端中看到新订单：审批状态2=待审批，审批人2=(user2的编号)，审批阶段2=区域管理员，审批流程2=门店下单，点“待审批”链接打开审批明细，看到明细信息一致。
+记下订单编号比如为999，下面做审批要用。
 
-结果：
-订单记录：审批状态=通过，状态=待服务（审批通过后自动更新逻辑），审批备注=（自动填写，包含刚刚填写的abc），点【审批状态】打开【审批记录】页面，看到3条审批记录。
+- user1界面内，按F12打开浏览器控制台，调用审批通过接口：`callSvr("ApproveRec.add", $.noop, {approveFlow:"门店下单", objId: 999, approveFlag:2})`
+- 结果：报错，没有权限审批。
 
-操作：人工发起审批。
-如果审批不通过，可以人工再次发起审批；或是在审批通过后，如果状态先回退后再改回来，无法再次自动触发审批流，需要人工发起审批。
+- 用户端user1退出登录，切换为user2登录系统，再次调用上述审批通过接口
+- 结果：在管理端中查看订单：审批状态2=待审批(注意不是"通过",因为还有下一阶段)，审批人2=(user2编号)，审批流程2=门店下单，审批阶段2=总部管理员(进入第2阶段)
+点链接查看审批记录列表，与上面信息一致。
 
-- 审批状态=通过（或未通过）的订单，工具栏点（按钮）毛利率审批-发起审批，点（按钮）确定，提交审批。
+- 再次调用上述审批通过接口
+- 结果：报错，没有权限审批。
 
-结果：
-- 订单：审批状态=待审批
+- 切换user4登录系统，再次调用上述审批接口
+- 结果：在管理端中查看订单：审批状态2=通过，审批备注2=(检查是否正确)，
 
-操作：最高管理员有权审批，无论角色是否匹配（步骤略）
+- 在管理端修改user1的客户组：grp=销售2部
+- 回到用户端，以user1身份登录并再下一单
+- 结果：在管理端中看到新订单：审批状态2=待审批，审批人2=(user3的编号)，记下订单编号，如1000。
 
-操作：不可修改或删除审批记录；但允许批量修改或批量删除，这非正常操作，仅应测试使用。
+- 以user3登录系统，审批不通过：`callSvr("ApproveRec.add", $.noop, {approveFlow:"门店下单", objId: 1000, approveFlag:3})`
+- 结果：在管理端中查看订单：审批状态2=不通过，审批阶段2=区域管理员
 
-- 在订单行上，点【审批状态】打开【审批记录】页面
-- 按住Ctrl点删除键，弹出批量删除确认框，点确定按钮删除该订单关联的审批记录。
-- 回到订单列表，刷新订单行。
+- user3审批通过：`callSvr("ApproveRec.add", $.noop, {approveFlow:"门店下单", objId: 1000, approveFlag:2})`
+- 结果：在管理端中查看订单：审批状态2=待审批(注意不是"通过"，因为还有下一阶段)，审批阶段2=总部管理员
 
-结果：订单行：审批状态=无审批，审批备注等字段均被清空。
+- user3再次审批不通过：`callSvr("ApproveRec.add", $.noop, {approveFlow:"门店下单", objId: 1000, approveFlag:3})`
+- 结果：报错，没有权限审批。(此时已是总部管理员审批阶段)
+
+- 切换user4登录系统，审批不通过：`callSvr("ApproveRec.add", $.noop, {approveFlow:"门店下单", objId: 1000, approveFlag:3})`
+- 结果：在管理端中查看订单：审批状态2=不通过，审批阶段2=总部管理员
+
+- user4审批通过：`callSvr("ApproveRec.add", $.noop, {approveFlow:"门店下单", objId: 1000, approveFlag:2})`
+- 结果：在管理端中查看订单：审批状态2=通过，审批阶段2=总部管理员
 

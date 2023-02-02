@@ -1,6 +1,7 @@
 // "审批记录",
 (function () {
 
+var empTable = "Employee";
 function EmployeeGrid(opt) {
 	return $.extend({
 		jd_vField: "empName",
@@ -21,7 +22,7 @@ function EmployeeGrid(opt) {
 				}
 			]
 		],
-		url: WUI.makeUrl("Employee.query", {res:"id,name"})
+		url: WUI.makeUrl(empTable+".query", {res:"id,name"})
 	}, opt);
 }
 
@@ -75,7 +76,7 @@ var meta = {
 		{
 			name: "approveDscr",
 			title: "审批备注",
-			type: "s",
+			type: "t",
 			uiType: "text",
 		},
 		{
@@ -116,5 +117,27 @@ var meta = {
 		}
 	],
 }
+
+// 问题：empId可能关联Employee，也可能关联User，须根据showPage时的pageFilter.empTable参数（不传即使用"Employee"）确定字段的下拉选项。
+// WUI.showPage("pageUi", {uimeta: "metaApproveRec", pageFilter: {empTable:"User", cond: {...} }});
+// 后端query接口也会处理empTable参数
+UiMeta.on("beforeshow", "dlgUi_inst_metaApproveRec", function (ev, formMode, opt) {
+	// 通过beforeshow中的opt.jtbl找到关联的列表，进而找到页面所在页面，进而取页面pageFilter参数。
+	var jdlg = $(ev.target);
+	var jtbl = opt.objParam.jtbl;
+	if (!jtbl || jtbl.size() == 0)
+		return;
+	var jpage = jtbl.closest(".wui-page");
+	if (jpage.size() == 0)
+		return;
+	var pageFilter = WUI.getPageFilter(jpage);
+	var empTable1 = pageFilter.empTable || "Employee";
+	if (empTable1 != empTable) {
+		empTable = empTable1;
+		jdlg.gn("empId").setOption(EmployeeGrid());
+		jdlg.gn("approveEmpId").setOption(EmployeeGrid({jd_vField: "approveEmpName"}));
+	}
+});
+
 return meta;
 })()
